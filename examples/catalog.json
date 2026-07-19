@@ -1,0 +1,223 @@
+{
+  "database": "fleet",
+  "collected_at": "2026-07-14T09:12:03+00:00",
+  "postgis_version": "3.4.2",
+  "tables": [
+    {
+      "name": "public.vehicle_positions",
+      "row_count": 412000000,
+      "table_bytes": 61000000000,
+      "inserts": 412000000,
+      "updates": 0,
+      "deletes": 0,
+      "append_only": true,
+      "column_correlation": {
+        "recorded_at": 0.999,
+        "vehicle_id": 0.011
+      },
+      "geometry_columns": [
+        {
+          "name": "geom",
+          "geometry_type": "POINT",
+          "srid": 3857,
+          "avg_bbox_width": 0.0,
+          "avg_bbox_height": 0.0,
+          "extent_width": 62000.0,
+          "extent_height": 41000.0,
+          "correlation": 0.94
+        }
+      ],
+      "indexes": [
+        {
+          "name": "vehicle_positions_pkey",
+          "method": "btree",
+          "columns": ["id"],
+          "unique": true,
+          "size_bytes": 9250000000,
+          "definition": "CREATE UNIQUE INDEX vehicle_positions_pkey ON public.vehicle_positions USING btree (id)"
+        },
+        {
+          "name": "idx_vehicle_positions_recorded_at",
+          "method": "brin",
+          "columns": ["recorded_at"],
+          "unique": false,
+          "size_bytes": 1310720,
+          "definition": "CREATE INDEX idx_vehicle_positions_recorded_at ON public.vehicle_positions USING brin (recorded_at)"
+        }
+      ]
+    },
+    {
+      "name": "public.trips",
+      "row_count": 9400000,
+      "table_bytes": 3800000000,
+      "inserts": 9400000,
+      "updates": 4100000,
+      "deletes": 12000,
+      "column_correlation": {
+        "started_at": 0.97,
+        "fleet_id": 0.19
+      },
+      "geometry_columns": [
+        {
+          "name": "geom",
+          "geometry_type": "MULTILINESTRING",
+          "srid": 3857,
+          "avg_bbox_width": 2400.0,
+          "avg_bbox_height": 1800.0,
+          "extent_width": 62000.0,
+          "extent_height": 41000.0,
+          "correlation": 0.24
+        }
+      ],
+      "indexes": [
+        {
+          "name": "trips_pkey",
+          "method": "btree",
+          "columns": ["id"],
+          "unique": true,
+          "size_bytes": 211000000
+        },
+        {
+          "name": "idx_trips_fleet_started",
+          "method": "btree",
+          "columns": ["fleet_id", "started_at"],
+          "unique": false,
+          "size_bytes": 289000000
+        },
+        {
+          "name": "idx_trips_fleet",
+          "method": "btree",
+          "columns": ["fleet_id"],
+          "unique": false,
+          "size_bytes": 174000000
+        }
+      ]
+    },
+    {
+      "name": "public.geofences",
+      "row_count": 24000,
+      "table_bytes": 190000000,
+      "inserts": 26400,
+      "updates": 8100,
+      "deletes": 2400,
+      "column_correlation": {
+        "active": 0.62
+      },
+      "geometry_columns": [
+        {
+          "name": "geom",
+          "geometry_type": "POLYGON",
+          "srid": 3857,
+          "avg_bbox_width": 900.0,
+          "avg_bbox_height": 760.0,
+          "extent_width": 62000.0,
+          "extent_height": 41000.0,
+          "correlation": 0.41
+        }
+      ],
+      "indexes": [
+        {
+          "name": "geofences_pkey",
+          "method": "btree",
+          "columns": ["id"],
+          "unique": true,
+          "size_bytes": 540672
+        },
+        {
+          "name": "idx_geofences_geom_gist",
+          "method": "gist",
+          "columns": ["geom"],
+          "unique": false,
+          "size_bytes": 1638400,
+          "definition": "CREATE INDEX idx_geofences_geom_gist ON public.geofences USING gist (geom)"
+        },
+        {
+          "name": "geofences_geom_idx",
+          "method": "gist",
+          "columns": ["geom"],
+          "unique": false,
+          "size_bytes": 1638400,
+          "definition": "CREATE INDEX geofences_geom_idx ON public.geofences USING gist (geom)"
+        }
+      ]
+    },
+    {
+      "name": "public.driver_pings",
+      "row_count": 88000000,
+      "table_bytes": 14000000000,
+      "inserts": 88000000,
+      "updates": 210000,
+      "deletes": 0,
+      "column_correlation": {
+        "created_at": 0.998
+      },
+      "geometry_columns": [
+        {
+          "name": "geom",
+          "geometry_type": "POINT",
+          "srid": 3857,
+          "avg_bbox_width": 0.0,
+          "avg_bbox_height": 0.0,
+          "extent_width": 62000.0,
+          "extent_height": 41000.0,
+          "correlation": 0.22
+        }
+      ],
+      "indexes": [
+        {
+          "name": "driver_pings_pkey",
+          "method": "btree",
+          "columns": ["id"],
+          "unique": true,
+          "size_bytes": 1980000000
+        },
+        {
+          "name": "idx_driver_pings_geom_gist",
+          "method": "gist",
+          "columns": ["geom"],
+          "unique": false,
+          "size_bytes": 4400000000
+        }
+      ]
+    },
+    {
+      "name": "public.zone_visits",
+      "row_count": 46000000,
+      "table_bytes": 7300000000,
+      "inserts": 46000000,
+      "updates": 900000,
+      "deletes": 0,
+      "column_correlation": {
+        "entered_at": 0.981
+      },
+      "geometry_columns": [
+        {
+          "name": "geom",
+          "geometry_type": "POLYGON",
+          "srid": 3857,
+          "avg_bbox_width": 8000.0,
+          "avg_bbox_height": 6200.0,
+          "extent_width": 62000.0,
+          "extent_height": 41000.0,
+          "correlation": 0.08
+        }
+      ],
+      "indexes": [
+        {
+          "name": "zone_visits_pkey",
+          "method": "btree",
+          "columns": ["id"],
+          "unique": true,
+          "size_bytes": 1030000000
+        },
+        {
+          "name": "idx_zone_visits_geom_gist",
+          "method": "gist",
+          "columns": ["geom"],
+          "unique": false,
+          "size_bytes": 2300000000
+        }
+      ]
+    }
+  ]
+}

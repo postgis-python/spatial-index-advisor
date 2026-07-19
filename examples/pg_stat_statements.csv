@@ -1,0 +1,11 @@
+query,calls,total_exec_time,rows
+"SELECT p.id, p.vehicle_id, p.recorded_at FROM vehicle_positions p WHERE ST_DWithin(p.geom, ST_SetSRID(ST_MakePoint($1, $2), $3), $4) AND p.recorded_at > now() - $5::interval ORDER BY p.recorded_at DESC LIMIT $6",1243900,9821334.21,18658500
+"SELECT g.id, count(*) AS hits FROM geofences g JOIN vehicle_positions p ON ST_Contains(g.geom, p.geom) WHERE g.active = $1 GROUP BY g.id",86400,4210993.77,2073600
+"SELECT t.id, t.started_at, t.fleet_id FROM trips t WHERE ST_Intersects(t.geom, ST_MakeEnvelope($1, $2, $3, $4, $5)) AND t.fleet_id = $6",241800,1988421.06,7254000
+"SELECT t.id FROM trips t WHERE t.geom && ST_MakeEnvelope($1, $2, $3, $4, $5) AND t.fleet_id = $6 ORDER BY t.started_at DESC LIMIT $7",104300,742119.48,1043000
+"SELECT d.id, d.driver_id FROM driver_pings d ORDER BY d.geom <-> ST_SetSRID(ST_MakePoint($1, $2), $3) LIMIT $4",412700,388244.19,2063500
+"SELECT z.zone_id, count(*) FROM zone_visits z WHERE z.geom && ST_MakeEnvelope($1, $2, $3, $4, $5) GROUP BY z.zone_id",51200,2934771.55,3891200
+"SELECT p.id FROM vehicle_positions p WHERE ST_Distance(p.geom, ST_SetSRID(ST_MakePoint($1, $2), $3)) < $4 ORDER BY p.recorded_at DESC LIMIT $5",32400,2874120.53,97200
+"SELECT t.id FROM trips t WHERE ST_Intersects(ST_Transform(t.geom, $1), ST_SetSRID(ST_MakePoint($2, $3), $4))",7300,611903.82,21900
+"SELECT v.id, v.plate FROM vehicles v WHERE v.fleet_id = $1 AND v.retired_at IS NULL ORDER BY v.plate",18900,4412.07,472500
+"INSERT INTO vehicle_positions (vehicle_id, geom, recorded_at) VALUES ($1, ST_SetSRID(ST_MakePoint($2, $3), $4), $5)",412000000,1988334120.44,412000000

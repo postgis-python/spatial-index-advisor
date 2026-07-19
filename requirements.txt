@@ -1,0 +1,7 @@
+# Runtime dependencies.
+sqlglot>=30
+rich>=13
+
+# Only needed for `collect`, which reads a live database. The analysis engine
+# runs entirely from the JSON catalog snapshot and never imports psycopg.
+psycopg[binary]>=3.1
