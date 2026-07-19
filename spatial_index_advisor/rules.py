@@ -44,9 +44,15 @@ from .models import (
 # --------------------------------------------------------------------------- #
 
 #: Modelled cost saved across the workload at which a finding reaches each band.
-CRITICAL_COST_THRESHOLD: Final[float] = 1e7
-HIGH_COST_THRESHOLD: Final[float] = 1e5
-MEDIUM_COST_THRESHOLD: Final[float] = 1e3
+#:
+#: These scale with :data:`~spatial_index_advisor.costmodel.SPATIAL_OPERATOR_FACTOR`,
+#: which dominates the per-row term of every spatial scan. When that constant was
+#: corrected from 100 to the 5000 PostGIS actually declares, these moved by the
+#: same factor of 50 so that the severity bands keep describing the same
+#: workloads rather than promoting everything to CRITICAL.
+CRITICAL_COST_THRESHOLD: Final[float] = 5e8
+HIGH_COST_THRESHOLD: Final[float] = 5e6
+MEDIUM_COST_THRESHOLD: Final[float] = 5e4
 
 #: A finding is only CRITICAL if the change is also a large per-call win. A huge
 #: aggregate saving spread over millions of already-fast calls is not an
@@ -411,6 +417,13 @@ def rule_missing_gist(context: RuleContext) -> list[Recommendation]:
                     f"{usage.table.name}.{usage.column} with {', '.join(predicates)}, "
                     f"but the column has no spatial index. Every one of those calls scans "
                     f"all {usage.table.row_count:,} rows and evaluates the predicate per row."
+                    + (
+                        f" A further {usage.knn_calls:,} executions order by distance on the "
+                        f"same column; the one GiST index serves both, and it is the only "
+                        f"method that can."
+                        if usage.knn
+                        else ""
+                    )
                 ),
                 index_type="GiST",
                 type_rationale=(
@@ -438,71 +451,80 @@ def rule_missing_gist(context: RuleContext) -> list[Recommendation]:
     return recommendations
 
 
-def rule_spgist_for_knn(context: RuleContext) -> list[Recommendation]:
-    """Recommend SP-GiST for point tables dominated by nearest-neighbour queries."""
+def rule_knn_index(context: RuleContext) -> list[Recommendation]:
+    """Recommend GiST for columns whose traffic is dominated by KNN ordering.
+
+    GiST is the only PostGIS access method that can answer ``ORDER BY geom <-> x``
+    from the index. Its operator class is the only one registering ``<->`` and
+    ``<#>`` as ordering operators (``pg_amop.amoppurpose = 'o'``); SP-GiST and
+    BRIN register none, so neither can produce ordered output and the planner
+    falls back to a full scan with a top-N sort no matter how the query is
+    phrased. That is why this rule recommends GiST even for point columns, where
+    SP-GiST would otherwise be the more compact choice.
+    """
     recommendations: list[Recommendation] = []
     for usage in context.usages.values():
         geometry = usage.geometry
-        if geometry is None or not geometry.is_point or not usage.knn:
+        if geometry is None or not usage.knn:
             continue
         if usage.table.row_count < MIN_ROWS_FOR_INDEX:
             continue
-        if has_spatial_index(usage.table, usage.column, {"spgist"}):
+        # A GiST index already answers KNN from the index; nothing to add.
+        if has_spatial_index(usage.table, usage.column, {"gist"}):
             continue
-        if usage.knn_calls < usage.sargable_calls:
+        # When the column also carries sargable predicates, rule_missing_gist
+        # already proposes exactly this index. Firing here too would emit the
+        # same CREATE INDEX twice.
+        if usage.sargable:
             continue
 
         limit = usage.knn_limit
-        gist = existing_index_on(usage.table, usage.column, "gist")
-        if gist is not None:
-            current = costmodel.knn_index_cost(usage.table, limit, costmodel.GIST_ENTRY_BYTES)
-            baseline = f"existing GiST index {gist.name}"
-        else:
-            current = costmodel.knn_sort_cost(usage.table, limit)
-            baseline = "sequential scan with a top-N sort"
-        projected = costmodel.knn_index_cost(usage.table, limit, costmodel.SPGIST_ENTRY_BYTES)
+        current = costmodel.knn_sort_cost(usage.table, limit)
+        projected = costmodel.knn_index_cost(usage.table, limit, costmodel.GIST_ENTRY_BYTES)
         benefit = BenefitEstimate(
             current_cost_per_call=current,
             projected_cost_per_call=projected,
             calls=usage.knn_calls,
-            basis=f"{baseline} vs SP-GiST KNN scan returning {limit or 'all'} rows",
+            basis=(
+                "sequential scan with a top-N sort vs GiST KNN scan returning "
+                f"{limit or 'all'} rows"
+            ),
         )
         operators = sorted({knn.operator for _, knn in usage.knn})
         recommendations.append(
             Recommendation(
-                kind="spgist_knn",
-                title=f"Consider SP-GiST on {usage.table.name}.{usage.column} for KNN ordering",
+                kind="knn_gist",
+                title=f"Add a GiST index on {usage.table.name}.{usage.column} for KNN ordering",
                 table=usage.table.name,
-                severity=(
-                    severity_for(benefit, usage.table, cap=Severity.HIGH)
-                    if gist is None
-                    else Severity.MEDIUM
-                ),
+                severity=severity_for(benefit, usage.table, cap=Severity.HIGH),
                 confidence=Confidence.MEDIUM,
                 rationale=(
                     f"{usage.knn_calls:,} executions order by "
                     f"{', '.join(operators)} on a "
-                    f"{_geometry_type(geometry)} column, and KNN is the dominant access "
-                    f"pattern for it."
+                    f"{_geometry_type(geometry)} column with no GiST index, so each one sorts "
+                    f"all {usage.table.row_count:,} rows to return the nearest few."
                 ),
-                index_type="SP-GiST",
+                index_type="GiST",
                 type_rationale=(
-                    "SP-GiST indexes points with a quadtree rather than a bounding-box R-tree. "
-                    "Entries are smaller and the tree is shallower, which makes ordered KNN "
-                    "scans cheaper. It only applies to point geometries; for anything with "
-                    "extent, stay on GiST."
+                    "GiST is the only PostGIS method whose operator class registers <-> as an "
+                    "ordering operator, so it is the only one that can return rows in distance "
+                    "order straight from the index. SP-GiST is more compact for points and just "
+                    "as fast for containment searches, but it cannot serve KNN at all: with an "
+                    "SP-GiST index in place the planner still falls back to a full scan and a "
+                    "top-N sort."
                 ),
                 ddl=(
-                    f"CREATE INDEX CONCURRENTLY {index_name(usage.table.name, usage.column, 'spgist')} "
-                    f"ON {usage.table.name} USING SPGIST ({usage.column});"
+                    f"CREATE INDEX CONCURRENTLY {index_name(usage.table.name, usage.column, 'gist')} "
+                    f"ON {usage.table.name} USING GIST ({usage.column});"
                 ),
-                estimated_size_bytes=costmodel.spgist_index_size(usage.table.row_count),
+                estimated_size_bytes=costmodel.gist_index_size(usage.table.row_count),
                 benefit=benefit,
                 caveats=(
-                    "SP-GiST supports fewer operators than GiST; keep the GiST index if other "
-                    "statements use predicates SP-GiST cannot serve.",
-                    "Benchmark both before dropping either — the advantage is real but modest, "
-                    "and it depends on the point distribution.",
+                    "The index only orders by the <-> distance between bounding boxes for "
+                    "non-point geometries; PostGIS rechecks exact distance, which is why the "
+                    "win is largest on point columns.",
+                    "An ORDER BY with no LIMIT still reads the whole index; the benefit comes "
+                    "from returning only the first few rows.",
                 ),
                 fingerprints=usage.fingerprints(usage.knn),
                 docs_url=docs.GIST_OPTIMIZATION,
@@ -999,7 +1021,7 @@ RULES: Final[tuple[Callable[[RuleContext], list[Recommendation]], ...]] = (
     rule_rewrite_advisories,
     rule_partial_index,
     rule_composite_index,
-    rule_spgist_for_knn,
+    rule_knn_index,
     rule_brin_for_append_only,
     rule_cluster,
     rule_redundant_indexes,

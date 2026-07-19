@@ -15,14 +15,28 @@ import datetime as dt
 import re
 from typing import Any, Final, Iterable, Protocol, Sequence
 
+from .costmodel import BLOCK_SIZE
 from .errors import CollectorError
 from .models import CatalogSnapshot, ExistingIndex, GeometryColumn, TableStats
 
 DEFAULT_SCHEMAS: Final[tuple[str, ...]] = ("public",)
 
+_NUMBER: Final[str] = r"-?[\d.eE+-]+"
+
 _BOX_RE: Final[re.Pattern[str]] = re.compile(
-    r"BOX\(\s*(-?[\d.eE+]+)\s+(-?[\d.eE+]+)\s*,\s*(-?[\d.eE+]+)\s+(-?[\d.eE+]+)\s*\)",
+    rf"BOX\(\s*({_NUMBER})\s+({_NUMBER})\s*,\s*({_NUMBER})\s+({_NUMBER})\s*\)",
     re.IGNORECASE,
+)
+
+#: A box2d rendered through ``ST_AsText`` comes back as a closed five-vertex
+#: polygon rather than ``BOX(...)``. Accepting it too means an extent is never
+#: silently dropped just because a caller wrapped the value differently.
+_POLYGON_RE: Final[re.Pattern[str]] = re.compile(
+    rf"POLYGON\(\(\s*(?:{_NUMBER}\s+{_NUMBER}\s*,\s*){{2}}({_NUMBER})\s+({_NUMBER})",
+    re.IGNORECASE,
+)
+_POLYGON_ORIGIN_RE: Final[re.Pattern[str]] = re.compile(
+    rf"POLYGON\(\(\s*({_NUMBER})\s+({_NUMBER})", re.IGNORECASE
 )
 
 
@@ -53,7 +67,11 @@ SELECT gc.f_table_schema,
        gc.type,
        gc.srid,
        c.reltuples::bigint,
-       pg_table_size(c.oid)
+       -- pg_relation_size, not pg_table_size: the cost model turns this into a
+       -- heap page count for sequential-scan costing, and a seq scan reads only
+       -- the main fork. pg_table_size adds TOAST, which for a table of large
+       -- polygons can be most of the bytes and none of the scanned pages.
+       pg_relation_size(c.oid)
 FROM geometry_columns gc
 JOIN pg_namespace n ON n.nspname = gc.f_table_schema
 JOIN pg_class c ON c.relname = gc.f_table_name AND c.relnamespace = n.oid
@@ -76,9 +94,13 @@ SELECT n.nspname,
        pg_relation_size(i.oid),
        pg_get_expr(idx.indpred, idx.indrelid),
        pg_get_indexdef(i.oid),
+       -- indnkeyatts, not indnatts: on PostgreSQL 11+ indnatts also counts
+       -- INCLUDE payload columns, which are not part of the index key. Counting
+       -- them would make "(a) INCLUDE (b)" look like a two-column index and so
+       -- break both duplicate and leading-prefix redundancy detection.
        ARRAY(
          SELECT pg_get_indexdef(idx.indexrelid, k + 1, true)
-         FROM generate_series(0, idx.indnatts - 1) AS k
+         FROM generate_series(0, idx.indnkeyatts - 1) AS k
        )
 FROM pg_index idx
 JOIN pg_class i ON i.oid = idx.indexrelid
@@ -95,7 +117,11 @@ FROM pg_stats
 WHERE schemaname = ANY(%s) AND correlation IS NOT NULL
 """
 
-EXTENT_QUERY: Final[str] = "SELECT ST_AsText(ST_EstimatedExtent(%s, %s, %s))"
+#: ``ST_EstimatedExtent`` returns a ``box2d``. Casting it to text yields the
+#: ``BOX(x1 y1,x2 y2)`` form :func:`parse_box2d` reads. Do not wrap this in
+#: ``ST_AsText``: that renders the box as a five-vertex ``POLYGON`` instead, which
+#: parses to nothing and silently discards the extent.
+EXTENT_QUERY: Final[str] = "SELECT ST_EstimatedExtent(%s, %s, %s)::text"
 
 AVERAGE_BBOX_QUERY: Final[str] = """
 SELECT avg(ST_XMax({column}) - ST_XMin({column})),
@@ -106,19 +132,39 @@ FROM (SELECT {column} FROM {table} TABLESAMPLE SYSTEM (%s) WHERE {column} IS NOT
 #: Percentage of pages sampled when measuring average feature size.
 SAMPLE_PERCENT: Final[float] = 1.0
 
+#: Fewest heap pages a sample should be expected to touch. ``TABLESAMPLE SYSTEM``
+#: accepts each page independently, so on a small table a flat 1% often selects
+#: nothing at all -- a 250-page table comes back empty roughly 8% of the time,
+#: silently dropping the feature-size statistic. The rate is raised on small
+#: tables so the expected page count clears this floor; large tables, where 1%
+#: is already plenty, are unaffected.
+MIN_SAMPLE_PAGES: Final[int] = 32
+
 #: Fraction of writes that may be updates or deletes for a table to count as
 #: append-mostly.
 APPEND_ONLY_WRITE_RATIO: Final[float] = 0.01
 
 
 def parse_box2d(text: str | None) -> tuple[float, float] | None:
-    """Extract ``(width, height)`` from a ``BOX(x1 y1,x2 y2)`` string."""
+    """Extract ``(width, height)`` from an extent string.
+
+    Accepts the ``BOX(x1 y1,x2 y2)`` form a ``box2d`` casts to, and also the
+    ``POLYGON((...))`` form ``ST_AsText`` produces from the same value, whose
+    third vertex is the opposite corner.
+    """
     if not text:
         return None
     match = _BOX_RE.search(text)
-    if match is None:
+    if match is not None:
+        x_min, y_min, x_max, y_max = (float(value) for value in match.groups())
+        return abs(x_max - x_min), abs(y_max - y_min)
+
+    origin = _POLYGON_ORIGIN_RE.search(text)
+    opposite = _POLYGON_RE.search(text)
+    if origin is None or opposite is None:
         return None
-    x_min, y_min, x_max, y_max = (float(value) for value in match.groups())
+    x_min, y_min = (float(value) for value in origin.groups())
+    x_max, y_max = (float(value) for value in opposite.groups())
     return abs(x_max - x_min), abs(y_max - y_min)
 
 
@@ -217,7 +263,9 @@ def collect_snapshot(
                 _first(_safe_optional_row(cursor, EXTENT_QUERY, [schema, table, column]))
             )
             average = (
-                _average_bbox(cursor, schema, table, column) if sample_geometry else None
+                _average_bbox(cursor, schema, table, column, sizes[key][1])
+                if sample_geometry
+                else None
             )
             table_correlations = correlations.get(key, {})
             geometry_by_table.setdefault(key, []).append(
@@ -273,12 +321,18 @@ def _first(row: Any) -> Any:
     return row[0] if isinstance(row, (list, tuple)) else row
 
 
+def sample_percent(table_bytes: int) -> float:
+    """Sampling rate for a table of ``table_bytes``, floored so small tables hit rows."""
+    pages = max(1, table_bytes // BLOCK_SIZE)
+    return min(100.0, max(SAMPLE_PERCENT, 100.0 * MIN_SAMPLE_PAGES / pages))
+
+
 def _average_bbox(
-    cursor: Cursor, schema: str, table: str, column: str
+    cursor: Cursor, schema: str, table: str, column: str, table_bytes: int = 0
 ) -> tuple[float, float] | None:
     """Measure the mean feature bounding box from a small table sample."""
     sql = AVERAGE_BBOX_QUERY.format(column=f'"{column}"', table=f'"{schema}"."{table}"')
-    row = _safe_optional_row(cursor, sql, [SAMPLE_PERCENT])
+    row = _safe_optional_row(cursor, sql, [sample_percent(table_bytes)])
     if not row or row[0] is None or row[1] is None:
         return None
     return float(row[0]), float(row[1])

@@ -69,7 +69,18 @@ BLOCK_SIZE: Final[int] = 8192
 # --------------------------------------------------------------------------- #
 
 #: How much more expensive a PostGIS predicate is than a scalar comparison.
-SPATIAL_OPERATOR_FACTOR: Final[float] = 100.0
+#:
+#: This is not a guess: PostGIS declares the geometry/geometry forms of
+#: ST_Intersects, ST_Contains, ST_DWithin and friends with ``procost = 5000``
+#: (``SELECT proname, procost FROM pg_proc``), and the planner charges
+#: ``procost * cpu_operator_cost`` per row for them. Using the real declared cost
+#: makes a modelled sequential scan agree with the planner's own ``cost=`` figure:
+#: measured against PostgreSQL 16 / PostGIS 3.4, a seq scan over 400k rows costs
+#: 5,008,939 in the planner and 5,008,939 here.
+#:
+#: The geography and text overloads are declared at 100 instead. Predicates on
+#: those are over-costed by this model by the same factor of 50.
+SPATIAL_OPERATOR_FACTOR: Final[float] = 5000.0
 
 #: Selectivity assumed for a spatial predicate with no usable statistics. 0.5% is
 #: deliberately conservative: real geofence and viewport queries are usually more

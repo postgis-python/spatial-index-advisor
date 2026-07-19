@@ -95,44 +95,63 @@ def test_missing_gist_ignores_columns_that_are_not_geometry() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# SP-GiST
+# KNN
+#
+# Only GiST registers <-> as an ordering operator, so KNN traffic must be sent
+# to GiST. Recommending SP-GiST here — as this rule once did — produces an index
+# the planner cannot use for ordering at all.
 # --------------------------------------------------------------------------- #
 
 
-def test_spgist_is_suggested_for_knn_on_a_point_table_with_a_gist_index() -> None:
+def test_knn_traffic_is_sent_to_gist() -> None:
     table = make_table(
         geometry_columns=(make_geometry(geometry_type="POINT", avg_bbox=(0.0, 0.0)),),
-        indexes=(GIST_ON_GEOM,),
     )
     workload = make_workload(("SELECT 1 FROM things ORDER BY geom <-> $1 LIMIT 5", 90_000))
-    (recommendation,) = rules.rule_spgist_for_knn(context_for(make_catalog(table), workload))
-    assert recommendation.index_type == "SP-GiST"
-    assert recommendation.severity is Severity.MEDIUM
-    assert "SPGIST" in recommendation.ddl
+    (recommendation,) = rules.rule_knn_index(context_for(make_catalog(table), workload))
+    assert recommendation.index_type == "GiST"
+    assert "USING GIST" in recommendation.ddl
+    assert "SPGIST" not in recommendation.ddl.upper()
 
 
-def test_spgist_is_not_suggested_for_polygons() -> None:
+def test_knn_is_recommended_for_non_point_geometries_too() -> None:
+    """GiST KNN is not restricted to points, unlike the SP-GiST rule it replaced."""
     table = make_table(geometry_columns=(make_geometry(geometry_type="POLYGON"),))
     workload = make_workload(("SELECT 1 FROM things ORDER BY geom <-> $1 LIMIT 5", 90_000))
-    assert rules.rule_spgist_for_knn(context_for(make_catalog(table), workload)) == []
+    (recommendation,) = rules.rule_knn_index(context_for(make_catalog(table), workload))
+    assert recommendation.index_type == "GiST"
 
 
-def test_spgist_is_not_suggested_when_knn_is_not_the_dominant_pattern() -> None:
-    table = make_table(geometry_columns=(make_geometry(geometry_type="POINT"),))
-    workload = make_workload(
-        ("SELECT 1 FROM things ORDER BY geom <-> $1 LIMIT 5", 10),
-        ("SELECT 1 FROM things WHERE ST_Intersects(geom, $1)", 90_000),
+def test_knn_is_silent_when_a_gist_index_already_exists() -> None:
+    table = make_table(
+        geometry_columns=(make_geometry(geometry_type="POINT"),), indexes=(GIST_ON_GEOM,)
     )
-    assert rules.rule_spgist_for_knn(context_for(make_catalog(table), workload)) == []
+    workload = make_workload(("SELECT 1 FROM things ORDER BY geom <-> $1 LIMIT 5", 90_000))
+    assert rules.rule_knn_index(context_for(make_catalog(table), workload)) == []
 
 
-def test_spgist_is_not_repeated_when_one_already_exists() -> None:
+def test_an_spgist_index_does_not_suppress_the_knn_finding() -> None:
+    """SP-GiST cannot answer KNN, so its presence is no reason to stay quiet."""
     index = ExistingIndex(name="i", method="spgist", columns=("geom",))
     table = make_table(
         geometry_columns=(make_geometry(geometry_type="POINT"),), indexes=(index,)
     )
     workload = make_workload(("SELECT 1 FROM things ORDER BY geom <-> $1 LIMIT 5", 90_000))
-    assert rules.rule_spgist_for_knn(context_for(make_catalog(table), workload)) == []
+    (recommendation,) = rules.rule_knn_index(context_for(make_catalog(table), workload))
+    assert recommendation.index_type == "GiST"
+
+
+def test_knn_defers_to_the_missing_gist_rule_when_the_column_is_also_filtered() -> None:
+    """Both rules would emit the same CREATE INDEX; only one should."""
+    table = make_table(geometry_columns=(make_geometry(geometry_type="POINT"),))
+    workload = make_workload(
+        ("SELECT 1 FROM things ORDER BY geom <-> $1 LIMIT 5", 90_000),
+        ("SELECT 1 FROM things WHERE ST_Intersects(geom, $1)", 10),
+    )
+    context = context_for(make_catalog(table), workload)
+    assert rules.rule_knn_index(context) == []
+    (gist,) = rules.rule_missing_gist(context)
+    assert "order by distance" in gist.rationale
 
 
 # --------------------------------------------------------------------------- #
@@ -513,7 +532,7 @@ def test_every_rule_fires_somewhere_across_the_shipped_examples(
     assert seen >= {
         "missing_gist",
         "brin",
-        "spgist_knn",
+        "knn_gist",
         "partial_index",
         "composite_index",
         "cluster",

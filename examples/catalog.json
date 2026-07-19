@@ -31,7 +31,9 @@
         {
           "name": "vehicle_positions_pkey",
           "method": "btree",
-          "columns": ["id"],
+          "columns": [
+            "id"
+          ],
           "unique": true,
           "size_bytes": 9250000000,
           "definition": "CREATE UNIQUE INDEX vehicle_positions_pkey ON public.vehicle_positions USING btree (id)"
@@ -39,7 +41,9 @@
         {
           "name": "idx_vehicle_positions_recorded_at",
           "method": "brin",
-          "columns": ["recorded_at"],
+          "columns": [
+            "recorded_at"
+          ],
           "unique": false,
           "size_bytes": 1310720,
           "definition": "CREATE INDEX idx_vehicle_positions_recorded_at ON public.vehicle_positions USING brin (recorded_at)"
@@ -73,21 +77,28 @@
         {
           "name": "trips_pkey",
           "method": "btree",
-          "columns": ["id"],
+          "columns": [
+            "id"
+          ],
           "unique": true,
           "size_bytes": 211000000
         },
         {
           "name": "idx_trips_fleet_started",
           "method": "btree",
-          "columns": ["fleet_id", "started_at"],
+          "columns": [
+            "fleet_id",
+            "started_at"
+          ],
           "unique": false,
           "size_bytes": 289000000
         },
         {
           "name": "idx_trips_fleet",
           "method": "btree",
-          "columns": ["fleet_id"],
+          "columns": [
+            "fleet_id"
+          ],
           "unique": false,
           "size_bytes": 174000000
         }
@@ -119,14 +130,18 @@
         {
           "name": "geofences_pkey",
           "method": "btree",
-          "columns": ["id"],
+          "columns": [
+            "id"
+          ],
           "unique": true,
           "size_bytes": 540672
         },
         {
           "name": "idx_geofences_geom_gist",
           "method": "gist",
-          "columns": ["geom"],
+          "columns": [
+            "geom"
+          ],
           "unique": false,
           "size_bytes": 1638400,
           "definition": "CREATE INDEX idx_geofences_geom_gist ON public.geofences USING gist (geom)"
@@ -134,7 +149,9 @@
         {
           "name": "geofences_geom_idx",
           "method": "gist",
-          "columns": ["geom"],
+          "columns": [
+            "geom"
+          ],
           "unique": false,
           "size_bytes": 1638400,
           "definition": "CREATE INDEX geofences_geom_idx ON public.geofences USING gist (geom)"
@@ -167,16 +184,11 @@
         {
           "name": "driver_pings_pkey",
           "method": "btree",
-          "columns": ["id"],
+          "columns": [
+            "id"
+          ],
           "unique": true,
           "size_bytes": 1980000000
-        },
-        {
-          "name": "idx_driver_pings_geom_gist",
-          "method": "gist",
-          "columns": ["geom"],
-          "unique": false,
-          "size_bytes": 4400000000
         }
       ]
     },
@@ -206,14 +218,18 @@
         {
           "name": "zone_visits_pkey",
           "method": "btree",
-          "columns": ["id"],
+          "columns": [
+            "id"
+          ],
           "unique": true,
           "size_bytes": 1030000000
         },
         {
           "name": "idx_zone_visits_geom_gist",
           "method": "gist",
-          "columns": ["geom"],
+          "columns": [
+            "geom"
+          ],
           "unique": false,
           "size_bytes": 2300000000
         }

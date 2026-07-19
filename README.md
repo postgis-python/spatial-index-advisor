@@ -15,7 +15,9 @@ It covers:
 - **Missing GiST indexes** on geometry columns that sargable spatial predicates filter on.
 - **BRIN** on very large, append-mostly tables whose geometry correlates with physical order —
   with an explicit list of the conditions that make BRIN a bad idea.
-- **SP-GiST** for point tables dominated by KNN (`ORDER BY geom <-> ...`) traffic.
+- **GiST for KNN** on columns whose traffic is dominated by `ORDER BY geom <-> ...`. GiST is the
+  only PostGIS method that can answer these from the index at all — see the note on SP-GiST under
+  [the cost model](#the-cost-model).
 - **Partial indexes** when a high-frequency statement always carries the same constant filter.
 - **Composite (`btree_gist`) indexes** when a parameterised equality always co-occurs with the
   spatial predicate, including the operator-class caveat.
@@ -93,9 +95,9 @@ Sources: examples/pg_stat_statements.csv(pgss)
 ┏━━━━━┳━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━┳━━━━━━━━┓
 ┃   # ┃ Severity ┃ Recommendation                   ┃ Type           ┃ Saving/speedup ┃ Conf.  ┃
 ┡━━━━━╇━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━╇━━━━━━━━┩
-│   1 │ CRITICAL │ Add a GiST index on              │ GiST           │   150.3T / 72x │ medium │
+│   1 │ CRITICAL │ Add a GiST index on              │ GiST           │  6797.2T / 99x │ medium │
 │     │          │ public.vehicle_positions.geom    │                │                │        │
-│   2 │ CRITICAL │ Rewrite the predicate on         │ -              │     3.7T / 72x │ high   │
+│   2 │ CRITICAL │ Rewrite the predicate on         │ -              │   165.5T / 99x │ high   │
 │     │          │ public.vehicle_positions.geom:   │                │                │        │
 │     │          │ ST_Distance                      │                │                │        │
 └─────┴──────────┴──────────────────────────────────┴────────────────┴────────────────┴────────┘
@@ -298,11 +300,11 @@ placeholder.
       "docs_url": "https://www.postgis-python.com/advanced-gist-indexing-optimization/",
       "estimate_is_heuristic": true,
       "benefit": {
-        "current_cost_per_call": 114566289.0,
-        "projected_cost_per_call": 1590317.56,
+        "current_cost_per_call": 5161566289.0,
+        "projected_cost_per_call": 52060317.56,
         "calls": 1330300,
-        "total_cost_saved": 150291934808893.5,
-        "speedup": 72.0,
+        "total_cost_saved": 6797175793808893.0,
+        "speedup": 99.1,
         "basis": "sequential scan vs GiST scan at 0.5000% selectivity (default assumption, no geometry statistics available)"
       }
     }
@@ -386,8 +388,12 @@ Only top-level `AND` operands are eligible as partial-index predicates, because 
 It uses PostgreSQL's default planner parameters (`seq_page_cost = 1.0`, `random_page_cost = 4.0`,
 `cpu_tuple_cost = 0.01`, `cpu_operator_cost = 0.0025`) so the figures are broadly comparable to
 the `cost=` values in an `EXPLAIN` plan, plus one model constant of its own: spatial predicates
-are charged 100× a scalar comparison, which is the order of magnitude PostGIS itself declares for
-those functions.
+are charged 5000× a scalar comparison, which is the `procost` PostGIS declares for the
+geometry/geometry forms of `ST_Intersects`, `ST_Contains` and `ST_DWithin` (`SELECT proname,
+procost FROM pg_proc`). Checked against PostgreSQL 16 / PostGIS 3.4, a modelled sequential scan
+reproduces the planner's own total cost exactly on three of four test tables; the fourth differs
+by 2× because its predicate wraps the column in `ST_Transform`, so the planner charges two costly
+functions per row where the model charges one.
 
 - A **sequential scan** costs `pages × seq_page_cost + rows × (cpu_tuple_cost + spatial predicate
   cost)`.
@@ -402,7 +408,22 @@ those functions.
   bounding box area against the extent. Failing that, a flat 0.5% assumption — and the
   recommendation is downgraded to medium or low confidence and says so in its `basis` field.
 - **Index sizes** come from bytes-per-entry estimates: 40 for a 2D GiST box, 24 for an SP-GiST
-  quadtree leaf, one 64-byte summary per 128-page range for BRIN, at a 0.9 fill factor.
+  quadtree leaf, one 64-byte summary per 128-page range for BRIN, at a 0.9 fill factor. These hold
+  up well when built for real: against PostGIS 3.4 the model predicted 233.5 MB for a GiST index
+  that came out at 217 MB, 17.0 MB for one that came out at 16 MB, and 48 kB for a BRIN index that
+  came out at 40 kB. The exception is the partial index, which inherits the 20% coverage guess
+  described under [limitations](#limitations) and was 4× low.
+
+**On SP-GiST and KNN.** Earlier versions of this tool recommended SP-GiST for point columns whose
+traffic was dominated by `ORDER BY geom <-> point`. That advice was wrong. Only
+`gist_geometry_ops_2d` registers `<->` and `<#>` as *ordering* operators — in
+`pg_amop`, `amoppurpose = 'o'` — and `spgist_geometry_ops_2d` registers none. An SP-GiST index
+therefore cannot return rows in distance order under any circumstances: measured on 150,000 point
+rows, adding one left the plan an unchanged sequential scan with a top-N sort even with
+`enable_seqscan = off`, while the equivalent GiST index turned the same query into an ordered
+index scan and took it from 25.5 ms to 0.12 ms. SP-GiST remains a fine choice for *containment*
+searches on points — it measured 0.23 ms against GiST's 0.25 ms on the same data — but this tool
+no longer proposes it, because the case it used to propose it for is the one case it cannot serve.
 
 Severity is capped twice. A rule cap encodes triage: "there is no index at all" can be CRITICAL,
 "a better index exists" cannot exceed HIGH, and "you have a duplicate index" is always LOW. A
@@ -417,11 +438,31 @@ Be aware of these before trusting a number:
 - **The estimates are model output, not measurements.** There is no planner, no `EXPLAIN`, no
   runtime feedback. They exist to rank recommendations against each other and give an order of
   magnitude. Measure before and after.
+- **The ranking is trustworthy; the magnitudes are not.** Every recommendation the tool produced
+  for a 6-table, 6.2-million-row PostGIS 3.4 schema was applied and measured with
+  `EXPLAIN (ANALYZE, BUFFERS)`. The ordering held up well — Spearman ρ = 0.87 against the real
+  ranking by total time saved, with the tool's top three being exactly the real top three (they
+  were within 8% of one another, so their internal order is a coin toss) and the bottom three in
+  exactly the right places. Individual speedups were much rougher: the ratio of measured to
+  estimated speedup ranged from 0.06× to 12×, median 0.56×. Treat a modelled speedup as "this is
+  the biggest win available", never as "this will be 99× faster".
+- **The model inherits the planner's optimism about `procost`.** Because the spatial predicate
+  cost now matches what PostGIS declares, the modelled sequential scan reproduces the planner's
+  `cost=` exactly — including where the planner is wrong. Both charge the full 5000× function cost
+  for every row, but a selective `&&` bounding-box test rejects most rows long before the exact
+  predicate runs. That is why the two worst overestimates in the calibration run were the largest
+  table, where the model predicted 100–200× and the measured win was 11×.
 - **Partial-index detection needs literals.** `pg_stat_statements` normalises constants to `$n`
   server-side, so a partial index can only be proposed from a log or SQL-file workload. This is
   why the tool supports several sources.
 - **Selectivity of the non-spatial column is assumed**, at 10% for a composite index and 20%
-  coverage for a partial index. Check `pg_stats.n_distinct` before sizing anything on those.
+  coverage for a partial index. Check `pg_stats.n_distinct` before sizing anything on those. These
+  two are pure guesses and they can be badly wrong in the direction that matters: in the
+  calibration run the dominant filter was `status = 'open'`, which covered 89% of the table, not
+  20%. The partial index was still a large win — but only because it replaced a sequential scan,
+  not because it was selective, and its size estimate was off by more than 4×. The assumption is
+  left in place because nothing in a workload file can reveal the true fraction; only the catalog
+  can, and the snapshot does not carry per-value statistics.
 - **CTEs and subqueries are flattened** into a single alias namespace. An unqualified column in a
   multi-table statement is left unresolved rather than guessed, so it is silently skipped.
 - **`<->` and `<#>` share an AST node**; a statement mixing both is reported under `<->`. The full

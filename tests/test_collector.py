@@ -16,10 +16,12 @@ from spatial_index_advisor.collector import (
     EXTENT_QUERY,
     GEOMETRY_COLUMNS_QUERY,
     INDEX_QUERY,
+    SAMPLE_PERCENT,
     TABLE_ACTIVITY_QUERY,
     VERSION_QUERY,
     collect_snapshot,
     parse_box2d,
+    sample_percent,
 )
 from spatial_index_advisor.errors import CollectorError
 
@@ -202,6 +204,82 @@ def test_the_snapshot_round_trips_through_the_catalog_loader() -> None:
 )
 def test_parse_box2d(text, expected) -> None:
     assert parse_box2d(text) == expected
+
+
+# --------------------------------------------------------------------------- #
+# Regressions found by running `collect` against a live PostGIS 3.4 database.
+# The literal strings below are what that server actually returned.
+# --------------------------------------------------------------------------- #
+
+
+def test_the_extent_query_yields_the_box_form_parse_box2d_can_read() -> None:
+    """``ST_AsText`` on a box2d renders a POLYGON, which the parser used to drop.
+
+    The query must cast to text instead. This pins the query shape, because the
+    failure was silent: the SQL succeeded and every extent came back None.
+    """
+    assert "::text" in EXTENT_QUERY
+    assert "ST_AsText" not in EXTENT_QUERY
+
+
+def test_parse_box2d_also_reads_the_polygon_rendering() -> None:
+    """Exact output of ST_AsText(ST_EstimatedExtent('public','vehicle_positions','geom'))."""
+    polygon = (
+        "POLYGON((12.992056846618652 52.29553985595703,"
+        "12.992056846618652 53.20450210571289,"
+        "14.607982635498047 53.20450210571289,"
+        "14.607982635498047 52.29553985595703,"
+        "12.992056846618652 52.29553985595703))"
+    )
+    width, height = parse_box2d(polygon)
+    assert width == pytest.approx(1.6159257888793945)
+    assert height == pytest.approx(0.9089622497558594)
+
+    box = "BOX(12.992056846618652 52.29553985595703,14.607982635498047 53.20450210571289)"
+    assert parse_box2d(box) == pytest.approx(parse_box2d(polygon))
+
+
+def sql_only(query: str) -> str:
+    """The query with ``--`` comment lines removed, so assertions test real SQL."""
+    return "\n".join(
+        line for line in query.splitlines() if not line.strip().startswith("--")
+    )
+
+
+def test_the_index_query_uses_the_key_column_count() -> None:
+    """``indnatts`` counts INCLUDE payload columns; only ``indnkeyatts`` is the key.
+
+    On PostgreSQL 16, an index created as ``(a) INCLUDE (b, c)`` reports
+    indnatts = 3 and indnkeyatts = 1, so the wrong one turns a single-column
+    index into a phantom three-column one and breaks redundancy detection.
+    """
+    assert "indnkeyatts" in sql_only(INDEX_QUERY)
+    assert "indnatts - 1" not in sql_only(INDEX_QUERY)
+
+
+def test_the_geometry_query_measures_only_the_main_fork() -> None:
+    """Heap page count drives seq-scan costing, and a seq scan skips TOAST."""
+    assert "pg_relation_size" in sql_only(GEOMETRY_COLUMNS_QUERY)
+    assert "pg_table_size" not in sql_only(GEOMETRY_COLUMNS_QUERY)
+
+
+@pytest.mark.parametrize(
+    ("table_bytes", "expected"),
+    [
+        (244 * 8192, pytest.approx(100.0 * 32 / 244)),  # small table: rate raised
+        (4939 * 8192, 1.0),  # large table: flat 1% is already enough
+        (0, 100.0),  # empty table: clamped to the whole table
+    ],
+)
+def test_sample_percent_floors_the_expected_page_count(table_bytes, expected) -> None:
+    """TABLESAMPLE SYSTEM accepts pages independently, so 1% of a 244-page table
+    selects nothing about 8% of the time and the statistic vanishes at random."""
+    assert sample_percent(table_bytes) == expected
+
+
+def test_a_small_table_is_sampled_hard_enough_to_return_rows() -> None:
+    assert sample_percent(244 * 8192) > SAMPLE_PERCENT
+    assert sample_percent(244 * 8192) <= 100.0
 
 
 def test_every_query_constant_is_exercised() -> None:
