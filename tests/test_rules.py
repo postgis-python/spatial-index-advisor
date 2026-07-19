@@ -362,7 +362,7 @@ def test_exact_duplicate_indexes_are_reported() -> None:
     )
     workload = make_workload(("SELECT 1 FROM things WHERE geom && $1", 10))
     (recommendation,) = rules.rule_redundant_indexes(context_for(make_catalog(table), workload))
-    assert recommendation.ddl == "DROP INDEX CONCURRENTLY b_gist;"
+    assert recommendation.ddl == "DROP INDEX CONCURRENTLY public.b_gist;"
     assert recommendation.estimated_size_bytes == 1000
 
 
@@ -375,7 +375,7 @@ def test_a_unique_duplicate_is_kept_and_the_other_dropped() -> None:
     )
     workload = make_workload(("SELECT 1 FROM things WHERE geom && $1", 10))
     (recommendation,) = rules.rule_redundant_indexes(context_for(make_catalog(table), workload))
-    assert recommendation.ddl == "DROP INDEX CONCURRENTLY plain;"
+    assert recommendation.ddl == "DROP INDEX CONCURRENTLY public.plain;"
 
 
 def test_prefix_indexes_are_reported() -> None:
@@ -387,7 +387,7 @@ def test_prefix_indexes_are_reported() -> None:
     )
     workload = make_workload(("SELECT 1 FROM things WHERE geom && $1", 10))
     (recommendation,) = rules.rule_redundant_indexes(context_for(make_catalog(table), workload))
-    assert recommendation.ddl == "DROP INDEX CONCURRENTLY narrow;"
+    assert recommendation.ddl == "DROP INDEX CONCURRENTLY public.narrow;"
     assert "prefix" in recommendation.rationale
 
 
@@ -539,3 +539,36 @@ def test_every_rule_fires_somewhere_across_the_shipped_examples(
         "redundant_index",
         "rewrite",
     }
+
+
+def test_the_drop_statement_is_schema_qualified() -> None:
+    """A bare index name in DROP INDEX resolves through search_path.
+
+    Against a schema that is not on the path that fails outright, and if an
+    index of the same name exists in a schema earlier on the path it drops that
+    one instead — silently, and irreversibly.
+    """
+    table = make_table(
+        name="tenant_7.things",
+        indexes=(
+            ExistingIndex(name="a_gist", method="gist", columns=("geom",), size_bytes=1000),
+            ExistingIndex(name="b_gist", method="gist", columns=("geom",), size_bytes=1000),
+        ),
+    )
+    workload = make_workload(("SELECT 1 FROM things WHERE geom && $1", 10))
+    (recommendation,) = rules.rule_redundant_indexes(context_for(make_catalog(table), workload))
+    assert recommendation.ddl == "DROP INDEX CONCURRENTLY tenant_7.b_gist;"
+
+
+def test_an_unqualified_table_leaves_the_index_name_bare() -> None:
+    """A snapshot without a schema must not gain a stray leading dot."""
+    table = make_table(
+        name="things",
+        indexes=(
+            ExistingIndex(name="a_gist", method="gist", columns=("geom",), size_bytes=1000),
+            ExistingIndex(name="b_gist", method="gist", columns=("geom",), size_bytes=1000),
+        ),
+    )
+    workload = make_workload(("SELECT 1 FROM things WHERE geom && $1", 10))
+    (recommendation,) = rules.rule_redundant_indexes(context_for(make_catalog(table), workload))
+    assert recommendation.ddl == "DROP INDEX CONCURRENTLY b_gist;"

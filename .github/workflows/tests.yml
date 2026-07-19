@@ -51,3 +51,58 @@ jobs:
               -w "$workload" -c examples/catalog.json \
               -f json --fail-on never > /dev/null
           done
+
+  # The job above never touches a database: the engine runs from a JSON snapshot,
+  # which is what keeps it fast. That leaves `collect` and the emitted DDL
+  # untested, and both depend on the PostgreSQL major version -- collect reads
+  # system catalogs whose columns and semantics move between releases, and four
+  # silent bugs turned up there the first time it met a real server. This job
+  # covers that gap on every supported version.
+  #
+  # SCOPE: correctness only -- snapshot fidelity and DDL validity. It asserts
+  # nothing about the cost model's numeric estimates. Those are heuristic figures
+  # in arbitrary PostgreSQL cost units, and the wall-clock timings needed to
+  # calibrate them are far too noisy on a shared runner to assert on without the
+  # job becoming flaky. This is not a benchmark; do not add timing assertions.
+  live:
+    name: live (postgis ${{ matrix.postgis }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        postgis: ["14-3.3", "15-3.4", "16-3.4", "17-3.5", "18-3.6"]
+    services:
+      postgis:
+        image: postgis/postgis:${{ matrix.postgis }}
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: advisor
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d advisor"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      # requirements.txt already pins psycopg[binary], which is all `collect`
+      # needs. The advisor itself is run from the checkout, not installed.
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      # The schema, the assertions and the workload live in the script so they
+      # can be run by hand against any DSN, not just in CI.
+      - name: Verify collect and the emitted DDL against a live server
+        run: |
+          python tests/live/verify_against_server.py \
+            --dsn "postgresql://postgres:postgres@localhost:5432/advisor"

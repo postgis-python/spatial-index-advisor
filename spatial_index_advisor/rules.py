@@ -307,6 +307,18 @@ def index_name(table: str, column: str, suffix: str) -> str:
     return cleaned[:_MAX_IDENTIFIER_LENGTH]
 
 
+def qualify_index(table: str, index: str) -> str:
+    """Qualify an index name with its table's schema.
+
+    An index always lives in the same schema as the table it covers, but
+    ``DROP INDEX`` resolves a bare name through ``search_path``. Against a
+    schema that is not on the path that fails, and — worse — if an index of the
+    same name exists in a schema earlier on the path, it drops that one instead.
+    """
+    schema, separator, _ = table.rpartition(".")
+    return f"{schema}.{index}" if separator else index
+
+
 def has_spatial_index(table: TableStats, column: str, methods: Iterable[str]) -> bool:
     """True when a usable index of one of ``methods`` already covers ``column``."""
     wanted = {method.lower() for method in methods}
@@ -920,7 +932,7 @@ def _drop_recommendation(
         ),
         index_type=drop.method,
         type_rationale="",
-        ddl=f"DROP INDEX CONCURRENTLY {drop.name};",
+        ddl=f"DROP INDEX CONCURRENTLY {qualify_index(table.name, drop.name)};",
         estimated_size_bytes=drop.size_bytes,
         benefit=None,
         caveats=(
