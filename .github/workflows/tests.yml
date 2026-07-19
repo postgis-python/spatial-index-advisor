@@ -1,0 +1,53 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: pytest --cov=spatial_index_advisor --cov-report=term-missing
+
+      # --fail-on never: the shipped workload deliberately contains critical
+      # findings, so the default exit status 2 is the correct behaviour, not a
+      # CI failure. This step checks the command runs, not what it concludes.
+      - name: Check the advisor runs on every shipped workload format
+        run: |
+          set -euo pipefail
+          for workload in examples/pg_stat_statements.csv \
+                          examples/postgresql-2026-07-14.csv \
+                          examples/queries.sql; do
+            echo "--- $workload"
+            python -m spatial_index_advisor analyze \
+              -w "$workload" -c examples/catalog.json \
+              -f json --fail-on never > /dev/null
+          done
